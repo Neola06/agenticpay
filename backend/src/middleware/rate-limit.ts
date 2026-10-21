@@ -434,3 +434,56 @@ export function tokenBucketRateLimit(opts: RateLimitOptions = {}) {
     next();
   };
 }
+
+export interface QuotaOverride {
+  tier?: UserTier;
+  capacity?: number;
+  refillRate?: number;
+  burstAllowance?: number;
+  expiresAt?: string | Date;
+}
+
+interface StoredQuotaOverride extends QuotaOverride {
+  clientKey: string;
+  expiresAt?: string;
+}
+
+const quotaOverrides = new Map<string, StoredQuotaOverride>();
+
+export function setQuotaOverride(clientKey: string, override: QuotaOverride): void {
+  const entry: StoredQuotaOverride = {
+    clientKey,
+    tier: override.tier,
+    capacity: override.capacity,
+    refillRate: override.refillRate,
+    burstAllowance: override.burstAllowance,
+    expiresAt: override.expiresAt instanceof Date ? override.expiresAt.toISOString() : override.expiresAt,
+  };
+  quotaOverrides.set(clientKey, entry);
+}
+
+export function removeQuotaOverride(clientKey: string): boolean {
+  return quotaOverrides.delete(clientKey);
+}
+
+export function listQuotaOverrides(): StoredQuotaOverride[] {
+  const now = Date.now();
+  const result: StoredQuotaOverride[] = [];
+  for (const [key, value] of Array.from(quotaOverrides.entries())) {
+    if (value.expiresAt && new Date(value.expiresAt).getTime() < now) {
+      quotaOverrides.delete(key);
+      continue;
+    }
+    result.push(value);
+  }
+  return result;
+}
+
+export function getQuotaOverride(clientKey: string): StoredQuotaOverride | undefined {
+  const override = quotaOverrides.get(clientKey);
+  if (override?.expiresAt && new Date(override.expiresAt).getTime() < Date.now()) {
+    quotaOverrides.delete(clientKey);
+    return undefined;
+  }
+  return override;
+}

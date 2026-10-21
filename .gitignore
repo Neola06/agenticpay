@@ -37,3 +37,8 @@ npm-debug.log*
 __snapshots__/
 **/__snapshots__/
 
+
+# Test snapshots
+*.snap
+test/__snapshots__/
+**/*.snap

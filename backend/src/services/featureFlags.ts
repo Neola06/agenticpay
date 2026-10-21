@@ -1,37 +1,77 @@
-import { createHash } from 'node:crypto';
+import { createHash } from "node:crypto";
 
 export interface FeatureFlagMetrics {
-servedTrue: number;
-servedFalse: number;
+  servedTrue: number;
+  servedFalse: number;
+}
+
+export interface FeatureFlagVariant {
+  key: string;
+  value: any;
+  weight: number;
+}
+
+export interface RolloutSchedule {
+  startPercentage: number;
+  endPercentage: number;
+  startTime: Date;
+  endTime: Date;
 }
 
 export interface FeatureFlag {
-name: string;
-enabled: boolean;
-rolloutPercentage: number;
-targetedUsers: Set<string>;
-metrics: FeatureFlagMetrics; // <-- Added metrics tracking
+  name: string;
+  enabled: boolean;
+  rolloutPercentage: number;
+  targetedUsers: Set<string>;
+  metrics: FeatureFlagMetrics;
+  variants?: FeatureFlagVariant[];
+  rolloutSchedule?: RolloutSchedule;
 }
 
 class FeatureFlagService {
-private flags: Map<string, FeatureFlag> = new Map();
+  private flags: Map<string, FeatureFlag> = new Map();
 
-constructor() {
-    // Initialize with some default flags for testing
-    this.upsertFlag('new-checkout-flow', true, 20); // 20% A/B test
-    this.upsertFlag('beta-dashboard', true, 0, ['dev-user-1', 'qa-tester']); // Targeted rollout
+  constructor() {
+    this.upsertFlag("new-checkout-flow", true, 20);
+    this.upsertFlag("beta-dashboard", true, 0, ["dev-user-1", "qa-tester"]);
   }
 
-  public upsertFlag(name: string, enabled: boolean, rolloutPercentage: number = 0, targetedUsers: string[] = []): void {
+  public upsertFlag(
+    name: string,
+    enabled: boolean,
+    rolloutPercentage: number = 0,
+    targetedUsers: string[] = [],
+    variants: FeatureFlagVariant[] = [],
+    rolloutSchedule?: RolloutSchedule
+  ): void {
     const existing = this.flags.get(name);
+
+    let effectiveRollout = Math.max(0, Math.min(100, rolloutPercentage));
+
+    if (rolloutSchedule) {
+      const now = Date.now();
+      const start = rolloutSchedule.startTime.getTime();
+      const end = rolloutSchedule.endTime.getTime();
+      if (now <= start) {
+        effectiveRollout = rolloutSchedule.startPercentage;
+      } else if (now >= end) {
+        effectiveRollout = rolloutSchedule.endPercentage;
+      } else {
+        const progress = (now - start) / (end - start);
+        effectiveRollout = Math.round(
+          rolloutSchedule.startPercentage + progress * (rolloutSchedule.endPercentage - rolloutSchedule.startPercentage)
+        );
+      }
+    }
 
     this.flags.set(name, {
       name,
       enabled,
-      rolloutPercentage: Math.max(0, Math.min(100, rolloutPercentage)),
+      rolloutPercentage: effectiveRollout,
       targetedUsers: new Set(targetedUsers),
-      // Preserve existing metrics on update, or initialize to 0
-      metrics: existing?.metrics || { servedTrue: 0, servedFalse: 0 }
+      metrics: existing?.metrics || { servedTrue: 0, servedFalse: 0 },
+      variants: variants.length > 0 ? variants : existing?.variants,
+      rolloutSchedule: rolloutSchedule || existing?.rolloutSchedule,
     });
   }
 
@@ -47,49 +87,60 @@ constructor() {
     this.flags.delete(name);
   }
 
-  /**
-   * Deterministic flag evaluation with analytics tracking.
-   * Resolves in < 1ms to prevent API latency.
-   */
-  public evaluate(flagName: string, identifier: string): boolean {
+  public evaluate(flagName: string, identifier: string = ""): boolean {
     const flag = this.flags.get(flagName);
 
-    // Helper to track metrics before returning
     const trackAndReturn = (result: boolean) => {
       if (flag) {
-        result ? flag.metrics.servedTrue++ : flag.metrics.servedFalse++;
+        result ? (flag.metrics.servedTrue++) : (flag.metrics.servedFalse++);
       }
       return result;
     };
 
-    // 1. If flag doesn't exist or is globally disabled, return false (Instant Rollback)
     if (!flag || !flag.enabled) {
       return trackAndReturn(false);
     }
 
-    // 2. If user is explicitly targeted, return true (User Targeting)
-    if (flag.targetedUsers.has(identifier)) {
+    if (identifier && flag.targetedUsers.has(identifier)) {
       return trackAndReturn(true);
     }
 
-    // 3. If rollout is 100%, return true
     if (flag.rolloutPercentage === 100) {
       return trackAndReturn(true);
     }
 
-    // 4. If rollout is 0%, return false
     if (flag.rolloutPercentage === 0) {
       return trackAndReturn(false);
     }
 
-    // 5. Deterministic Percentage Rollout (A/B Testing)
-    // Hash the flag name + identifier so the same user always gets the same experience
-    const hash = createHash('md5').update(`${flagName}-${identifier}`).digest('hex');
-    // Take the first 4 characters, convert to integer, and map to a 1-100 range
+    const hash = createHash("md5").update(`${flagName}-${identifier}`).digest("hex");
     const hashInt = parseInt(hash.substring(0, 4), 16);
     const normalizedHash = (hashInt % 100) + 1;
 
     return trackAndReturn(normalizedHash <= flag.rolloutPercentage);
+  }
+
+  public evaluateVariant(flagName: string, identifier: string): string | null {
+    const flag = this.flags.get(flagName);
+
+    if (!flag || !flag.enabled || !flag.variants || flag.variants.length === 0) {
+      return null;
+    }
+
+    const totalWeight = flag.variants.reduce((sum, v) => sum + v.weight, 0);
+    const hash = createHash("md5").update(`${flagName}-variant-${identifier}`).digest("hex");
+    const hashInt = parseInt(hash.substring(0, 8), 16);
+    const bucket = hashInt % totalWeight;
+
+    let cumulative = 0;
+    for (const variant of flag.variants) {
+      cumulative += variant.weight;
+      if (bucket < cumulative) {
+        return variant.key;
+      }
+    }
+
+    return flag.variants[0]?.key || null;
   }
 }
 
